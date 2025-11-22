@@ -1,0 +1,11 @@
+version: "3.8"
+
+services:
+  docker-stats-exporter:
+    image: docker-stats-exporter:local
+    container_name: docker-stats-exporter
+    restart: unless-stopped
+    ports:
+      - "9417:9417"
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock:ro

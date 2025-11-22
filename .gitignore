@@ -1,0 +1,29 @@
+# Node modules
+node_modules/
+
+# Logs
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+pnpm-debug.log*
+logs/
+*.log
+
+# Environment variables
+.env
+.env.* 
+
+# OS / Editor files
+.DS_Store
+Thumbs.db
+
+# Optional: if you use VSCode settings specific to your machine
+.vscode/
+
+# Optional: If future Docker builds create artifacts
+dist/
+build/
+
+# Cache folders (npm, TypeScript, ESLint, etc — useful caso você adicione depois)
+.cache/
+.eslintcache
