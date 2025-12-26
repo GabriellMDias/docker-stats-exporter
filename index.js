@@ -2,6 +2,7 @@ const http = require("http");
 const Docker = require("dockerode");
 
 const PORT = process.env.PORT || 9417;
+const SCRAPE_INTERVAL_MS = parseInt(process.env.SCRAPE_INTERVAL_MS || "15000", 10); // 15s default
 
 // Connect to Docker daemon (Windows / Linux)
 let docker;
@@ -45,6 +46,8 @@ function getContainerStats(container) {
 }
 
 async function collectMetrics() {
+  const start = Date.now();
+
   let output =
     "# HELP docker_container_cpu_usage_seconds_total Total CPU time consumed by the container in seconds.\n" +
     "# TYPE docker_container_cpu_usage_seconds_total counter\n" +
@@ -65,26 +68,46 @@ async function collectMetrics() {
 
   // List running containers
   const containers = await docker.listContainers();
+  console.log(`[docker-stats-exporter] Collecting metrics for ${containers.length} containers...`);
 
-  for (const c of containers) {
-    const id = c.Id;
-    const name = c.Names && c.Names[0] ? c.Names[0].replace(/^\//, "") : id;
-    const image = c.Image || "";
+  // Fetch stats for all containers in parallel
+  const results = await Promise.allSettled(
+    containers.map(async (c) => {
+      const id = c.Id;
+      const name = c.Names && c.Names[0] ? c.Names[0].replace(/^\//, "") : id;
+      const image = c.Image || "";
 
-    const labels = {
-      container_id: id,
-      container_name: name,
-      image: image,
-    };
+      const labels = {
+        container_id: id,
+        container_name: name,
+        image: image,
+      };
 
-    let stats;
-    try {
       const container = docker.getContainer(id);
-      stats = await getContainerStats(container);
-    } catch (err) {
-      console.error(`Failed to fetch stats for container ${name}:`, err.message);
+      const statStart = Date.now();
+      const stats = await getContainerStats(container);
+      const statDuration = Date.now() - statStart;
+
+      if (statDuration > 2000) {
+        console.warn(
+          `[docker-stats-exporter] Warning: stats() for container ${name} took ${statDuration} ms`
+        );
+      }
+
+      return { labels, stats };
+    })
+  );
+
+  for (const result of results) {
+    if (result.status !== "fulfilled") {
+      console.error(
+        "[docker-stats-exporter] Failed to fetch stats for a container:",
+        result.reason && result.reason.message ? result.reason.message : result.reason
+      );
       continue;
     }
+
+    const { labels, stats } = result.value;
 
     // CPU (in seconds)
     const totalUsageNs =
@@ -187,21 +210,63 @@ async function collectMetrics() {
     output += formatMetric("docker_container_pids", labels, pids);
   }
 
+  const duration = Date.now() - start;
+  console.log(
+    `[docker-stats-exporter] Metrics collected in ${duration} ms`
+  );
+
+  // Optional: exporter internal metric as comment
+  output += `# docker_stats_exporter_collect_duration_ms ${duration}\n`;
+
   return output;
 }
+
+// Background collection & cached metrics
+let lastMetrics = "";
+let lastUpdated = 0;
+let isCollecting = false;
+
+async function refreshMetrics() {
+  if (isCollecting) {
+    // Avoid overlapping collections if one is still running
+    return;
+  }
+
+  isCollecting = true;
+  try {
+    const metrics = await collectMetrics();
+    lastMetrics = metrics;
+    lastUpdated = Date.now();
+  } catch (err) {
+    console.error("[docker-stats-exporter] Error collecting metrics:", err);
+  } finally {
+    isCollecting = false;
+  }
+}
+
+// Start initial collection and then run periodically
+refreshMetrics();
+setInterval(refreshMetrics, SCRAPE_INTERVAL_MS);
 
 // HTTP server exposing /metrics
 const server = http.createServer(async (req, res) => {
   if (req.url === "/metrics") {
-    try {
-      const metrics = await collectMetrics();
-      res.writeHead(200, { "Content-Type": "text/plain; version=0.0.4" });
-      res.end(metrics);
-    } catch (err) {
-      console.error("Error while collecting metrics:", err);
-      res.writeHead(500, { "Content-Type": "text/plain" });
-      res.end("# error collecting metrics\n");
+    if (!lastMetrics) {
+      res.writeHead(503, { "Content-Type": "text/plain" });
+      res.end("# metrics not ready yet\n");
+      return;
     }
+
+    res.writeHead(200, {
+      "Content-Type": "text/plain; version=0.0.4",
+    });
+
+    res.end(
+      lastMetrics +
+        `# docker_stats_exporter_last_updated ${Math.floor(
+          lastUpdated / 1000
+        )}\n`
+    );
   } else {
     res.writeHead(404, { "Content-Type": "text/plain" });
     res.end("Not found\n");
@@ -210,6 +275,6 @@ const server = http.createServer(async (req, res) => {
 
 server.listen(PORT, () => {
   console.log(
-    `Docker stats exporter listening on http://0.0.0.0:${PORT}/metrics`
+    `Docker stats exporter listening on http://0.0.0.0:${PORT}/metrics (interval: ${SCRAPE_INTERVAL_MS} ms)`
   );
 });
